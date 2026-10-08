@@ -1,0 +1,2 @@
+_target_: src.inference.inference.InferencePipeline
+# model, dataloader, accelerator are supplied at runtime.

@@ -1,0 +1,17 @@
+_target_: src.trainer.trainer.TrainingPipeline
+_recursive_: false
+_convert_: all
+iterations: 10000
+result_dir: ${result_dir}
+validate_every: 500
+patience: null
+grad_clip_norm: null
+use_ema: false
+ema:
+  update_after_step: 0
+  use_ema_warmup: false
+  min_decay: 0.0
+  decay: 0.9999
+  inv_gamma: 1.0
+  power: 0.75
+# model, dataloaders, optimizer, lr_scheduler, accelerator, run_config are supplied at runtime.

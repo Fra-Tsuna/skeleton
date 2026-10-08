@@ -1,0 +1,7 @@
+defaults:
+  - train
+  - override dataset: val
+
+batch_size: 64
+shuffle: false
+drop_last: false

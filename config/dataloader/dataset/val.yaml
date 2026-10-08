@@ -1,0 +1,3 @@
+_target_: src.dataset.dataset.Dataset
+data_root: ${data_root}
+split: val

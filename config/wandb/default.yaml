@@ -1,0 +1,4 @@
+project: ${name}
+entity: null
+mode: online  # online or offline; W&B always logs.
+tags: []

@@ -1,0 +1,11 @@
+defaults:
+  - train
+  - inference: default
+  - _self_
+
+checkpoint_path: ${ckpt_root}/best.pth
+apply_ema: false
+
+hydra:
+  run:
+    dir: ${original_work_dir}/outputs/${name}/eval/${now:%Y-%m-%d}/${now:%H-%M-%S}

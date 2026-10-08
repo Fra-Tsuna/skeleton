@@ -1,0 +1,10 @@
+# @package _global_
+# Copy this file for each named experiment and override only what changes.
+# Run with: python main.py experiment=default
+
+defaults:
+  - override /model: default
+  - override /optimizer: adamw
+  - override /lr_scheduler: cosine
+
+name: project

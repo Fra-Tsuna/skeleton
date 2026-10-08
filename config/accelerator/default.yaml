@@ -1,0 +1,5 @@
+_target_: accelerate.Accelerator
+cpu: false
+mixed_precision: "no"  # no, fp16, or bf16
+# The training loop advances the scheduler once per successful optimizer update.
+step_scheduler_with_optimizer: false

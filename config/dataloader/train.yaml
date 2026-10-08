@@ -1,0 +1,9 @@
+defaults:
+  - dataset: train
+
+_target_: torch.utils.data.DataLoader
+batch_size: 64
+num_workers: 0
+shuffle: true
+pin_memory: false
+drop_last: false
