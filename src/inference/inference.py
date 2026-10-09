@@ -1,39 +1,44 @@
-import torch
+from typing import Any, Dict, Union
 
+import torch
+from accelerate import Accelerator
+from torch.utils.data import DataLoader
+
+from src.models.model import Model
 from src.utils.torch_utils import aggregate_metrics, batch_size
 
 
 class InferencePipeline:
     """Run task-specific inference and aggregate evaluation metrics."""
 
-    def __init__(self, model, dataloader, accelerator):
-        self.model = accelerator.unwrap_model(model)
+    def __init__(self, model: Model, dataloader: DataLoader, accelerator: Accelerator):
+        self.model: Model = accelerator.unwrap_model(model)
         self.dataloader = dataloader
         self.accelerator = accelerator
 
-    def predict(self, batch):
+    def predict(self, batch: Any) -> Any:
         """Run the model on a batch; override for task-specific prediction logic."""
         return self.model(batch)
 
-    def compute_metrics(self, predictions, batch) -> dict:
+    def compute_metrics(self, predictions: Any, batch: Any) -> Dict[str, Union[torch.Tensor, float]]:
         """Return scalar batch means as tensors or Python numbers."""
         raise NotImplementedError("Implement InferencePipeline.compute_metrics for your project.")
 
-    def metric_weight(self, batch):
+    def metric_weight(self, batch: Any) -> int:
         # Weight batch-mean metrics by the number of samples in the batch.
         return batch_size(batch)
 
-    def on_prediction(self, predictions, batch, batch_index):
+    def on_prediction(self, predictions: Any, batch: Any, batch_index: int) -> None:
         """Optional hook for saving predictions or qualitative figures."""
         pass
 
     @torch.inference_mode()
-    def run(self):
+    def run(self) -> Dict[str, float]:
         # Disable training behavior and gradient tracking during evaluation.
         self.model.eval()
 
         # Accumulate weighted metric sums and sample counts on each process.
-        totals = {}
+        totals: Dict[str, float] = {}
         total_weight = 0
 
         for index, batch in enumerate(self.dataloader):

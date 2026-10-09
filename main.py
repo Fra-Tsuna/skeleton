@@ -1,11 +1,18 @@
 import logging
+from typing import Dict
 
 import hydra
+from accelerate import Accelerator
 from accelerate.utils import set_seed
 from diffusers.optimization import get_scheduler
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
+from torch.optim import Optimizer
+from torch.optim.lr_scheduler import LRScheduler
+from torch.utils.data import DataLoader
 
+from src.models.model import Model
+from src.trainer.trainer import TrainingPipeline
 from src.utils.mylogging import init_wandb, pretty_print_config
 from src.utils.torch_utils import (
     MiB,
@@ -18,29 +25,29 @@ logger = logging.getLogger(__name__)
 
 
 @hydra.main(version_base=None, config_path="config", config_name="train")
-def main(cfg: DictConfig):
+def main(cfg: DictConfig) -> Dict[str, float]:
 
     # Initialize Accelerate and seed the random number generators.
-    accelerator = instantiate(cfg.accelerator, log_with="wandb", project_dir=cfg.result_dir)
+    accelerator: Accelerator = instantiate(cfg.accelerator, log_with="wandb", project_dir=cfg.result_dir)
     set_seed(cfg.seed)
     if accelerator.is_main_process:  # Only the main process prints the cfg
         pretty_print_config(cfg)
 
     # Build training and validation DataLoaders.
     # Use separate seeds for their sampling and worker initialization.
-    train_loader = make_dataloader(cfg.train_dataloader, cfg.seed)
-    val_loader = make_dataloader(cfg.val_dataloader, cfg.seed + 1)
+    train_loader: DataLoader = make_dataloader(cfg.train_dataloader, cfg.seed)
+    val_loader: DataLoader = make_dataloader(cfg.val_dataloader, cfg.seed + 1)
 
     # Instantiate the model with its configured parameters and
     # any additional dataset-dependent params.
     model_kwargs = train_loader.dataset.model_kwargs()
-    model = instantiate(cfg.model, **model_kwargs)
+    model: Model = instantiate(cfg.model, **model_kwargs)
 
     # Initialize the optimizer with the model's trainable parameters.
-    optimizer = instantiate(cfg.optimizer, params=model.trainable_parameters())
+    optimizer: Optimizer = instantiate(cfg.optimizer, params=model.trainable_parameters())
 
     # Build the configured learning-rate scheduler.
-    lr_scheduler = get_scheduler(**cfg.lr_scheduler, optimizer=optimizer)
+    lr_scheduler: LRScheduler = get_scheduler(**cfg.lr_scheduler, optimizer=optimizer)
 
     # Report the training dataset size and model storage footprint.
     logger.info("Dataset size: %s", len(train_loader.dataset))
@@ -61,7 +68,7 @@ def main(cfg: DictConfig):
 
     try:
         # Instantiate the trainer with the prepared runtime objects.
-        trainer = instantiate(
+        trainer: TrainingPipeline = instantiate(
             cfg.trainer,
             model=model,
             dataloaders={"train": train_loader, "val": val_loader},
