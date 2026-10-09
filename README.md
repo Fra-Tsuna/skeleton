@@ -1,153 +1,180 @@
-# Project template
+# PyTorch project skeleton
 
-A project-agnostic PyTorch skeleton with Hydra configuration, mandatory W&B
-logging, and Hugging Face Accelerate integrated into training and evaluation.
-Implement the dataset, model, training loss, and evaluation metrics for each new
-project. No cluster dispatch configuration is included.
+A reusable training and evaluation skeleton built with PyTorch, Hydra,
+Accelerate, Diffusers, and W&B. It provides configuration, iteration-based
+training, validation, EMA, logging, and checkpoints. You supply the dataset,
+model, loss, and evaluation metrics. The default configuration is intentionally
+not a runnable experiment: those project-specific methods raise
+`NotImplementedError` until you implement them.
 
-```text
-main.py                       Training orchestration and entrypoint
-eval.py                       Evaluation orchestration and entrypoint
-config/
-  train.yaml / eval.yaml      Top-level configurations
-  accelerator/                Device and precision settings
-  dataloader/dataset/          Training and validation datasets
-  model/                      Model constructor configuration
-  optimizer/adamw.yaml         AdamW only
-  lr_scheduler/               Warmup plus cosine; constant LR
-  trainer/                    Training and optional EMA settings
-  inference/                  Evaluation pipeline configuration
-  experiment/                 Named experiment overrides
-  wandb/                      Mandatory W&B configuration
-src/
-  dataset/dataset.py          Dataset extension point
-  models/model.py             Model extension point
-  trainer/trainer.py          TrainingPipeline and validation
-  trainer/checkpoint_manager.py
-  inference/inference.py      InferencePipeline
-  utils/                      Logging, DataLoader helpers, figure saving
-scripts/                      Project preprocessing scripts
-assets/                       Project documentation media
-data/                         Local data, ignored by Git
-ckpt/                         Selected checkpoints, ignored by Git
-tests/                        Infrastructure checks
-```
+## Set up a project
 
-## Install
+Create a Conda environment, then install the dependencies from the repository's
+`requirements.txt`. Choose a PyTorch build suited to your hardware if the one
+installed from that file is not appropriate.
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+conda create -n my_project python=3.12 pip -y
+conda activate my_project
 python -m pip install -r requirements.txt
-wandb login
 ```
 
-W&B, Accelerate, Diffusers, and torchdata are required dependencies. Diffusers
-supplies the LR schedulers and EMA implementation. There is no custom EMA or LR
-scheduler. torchdata supplies the stateful DataLoader used for exact resume.
+W&B is required. Log in for online runs with `wandb login`, or set
+`wandb.mode=offline` when running locally. Accelerate and torchdata are also
+required; torchdata provides the stateful DataLoader used for mid-epoch resume.
+Diffusers provides the learning-rate schedulers and EMA implementation.
 
-## Add project code
+Implement these four extension points:
 
-Implement these extension points:
+| File | What to implement |
+| --- | --- |
+| `src/dataset/dataset.py` | Load a split and implement `__len__` and `__getitem__`. Optionally return model constructor arguments from `model_kwargs()`. |
+| `src/models/model.py` | Define the model and its `forward(batch)` method. `trainable_parameters()` supplies the optimizer parameters. |
+| `src/trainer/trainer.py` | Implement `TrainingPipeline.compute_loss(batch)`. Return a dictionary containing a scalar, differentiable `loss` tensor and any other scalar tensor metrics. |
+| `src/inference/inference.py` | Implement `InferencePipeline.compute_metrics(predictions, batch)`. Override `predict` if inference needs custom model calls or sampling. |
 
-1. `Dataset.__init__`, `__len__`, and `__getitem__` in `src/dataset/dataset.py`.
-2. `Model.__init__` and `forward` in `src/models/model.py`.
-3. `TrainingPipeline.compute_loss(batch)`: return scalar tensor batch means,
-   including a differentiable `loss`.
-4. `InferencePipeline.compute_metrics(predictions, batch)`: return scalar batch
-   means. Override `predict` if your model needs custom inference or sampling.
+Put constructor arguments in `config/model/` and `config/dataloader/dataset/`.
+Values returned by `Dataset.model_kwargs()` augment the model configuration and
+are saved in the best-model checkpoint, so evaluation can rebuild the model.
+The methods above are hooks: you can subclass the pipelines and select your
+subclasses through their Hydra `_target_` settings.
 
-Constructor arguments belong in the corresponding Hydra configuration.
-`Dataset.model_kwargs()` can supply inferred model dimensions. Metrics are
-weighted by sample count; override `metric_weight` for another denominator.
-The default placeholders deliberately raise `NotImplementedError`.
+Training and evaluation metrics should be **means over each batch** with stable
+keys. Validation and evaluation weight those means by sample count, including
+the smaller final batch. Override `metric_weight(batch)` in the relevant
+pipeline if your metric is averaged over tokens, pixels, or another unit.
+`compute_loss()` must return a `loss` key because training backpropagates it
+and validation uses it to select the best checkpoint.
 
-Training orchestration lives directly in `main.py`; evaluation orchestration
-lives directly in `eval.py`. There is no `src/run.py` or forwarded `main` call.
+## Configure and run
 
-## Train and evaluate
-
-Inspect configurations without running the project placeholders:
+Inspect the composed configuration before implementing the project hooks:
 
 ```bash
 python main.py --cfg job
 python eval.py --cfg job
 ```
 
-After implementing the project code:
+After implementing them, start training or override settings from the command
+line:
 
 ```bash
 python main.py
-python main.py experiment=default optimizer.lr=3e-4
-python main.py accelerator.cpu=true
-python main.py accelerator.mixed_precision=bf16
-python main.py trainer.use_ema=true
+python main.py name=my_project trainer.iterations=20000 optimizer.lr=3e-4
+python main.py accelerator.cpu=true wandb.mode=offline
+python main.py accelerator.mixed_precision=bf16 trainer.use_ema=true
 python main.py lr_scheduler=constant
+```
+
+`trainer.iterations` counts successful optimizer updates. The default cosine
+schedule warms up for `lr_scheduler.num_warmup_steps` updates and decays over
+`trainer.iterations` total updates. `lr_scheduler=constant` keeps the learning
+rate fixed. A skipped mixed-precision optimizer update does not advance the
+scheduler, EMA, or iteration counter. Mixed-precision support depends on your
+hardware. This trainer requires `gradient_accumulation_steps=1`.
+
+The training DataLoader batch size is **per process**. For multiple processes,
+configure Accelerate for your machine and give every process the same explicit
+Hydra output directory:
+
+```bash
+accelerate config
+accelerate launch --num_processes 2 main.py \
+  hydra.run.dir=/shared/path/to/my_run
+```
+
+Validation and evaluation shard the dataset without adding duplicate samples.
+The unwrapped model allows processes to finish uneven shards independently;
+their metric totals are combined across processes. There is no cluster job
+launcher in this repository. Accelerate retains device and precision state for
+the life of a process, so Hydra multiruns should not sweep `accelerator`
+settings within the same process.
+
+## Logging, checkpoints, and resume
+
+W&B starts for both training and evaluation. Its default mode is online; use
+`wandb.mode=offline` for local runs. `wandb.mode=disabled` is rejected. Hydra
+keeps the working directory fixed and writes each run under `outputs/` by
+default. A training run contains:
+
+```text
+outputs/<name>/<date>/<time>/
+  .hydra/                 Hydra configuration and overrides
+  config.yaml             Resolved run configuration
+  wandb/                  W&B run files
+  checkpoints/
+    best.pth              Best model for standalone evaluation
+    last/                 Latest resumable training state
+```
+
+Validation runs every `trainer.validate_every` updates and at the final update.
+`best.pth` is updated when the globally aggregated validation loss improves. It
+contains model weights, optional EMA weights, the model configuration, and the
+best loss. Enable EMA with `trainer.use_ema=true`; validation then uses EMA
+weights. `trainer.patience` counts validation checks without improvement;
+`null` disables early stopping.
+
+`last/` is a resumable Accelerate state directory, saved every
+`trainer.checkpoint_every` updates and at the final update or early stop. It
+contains the model, optimizer, scheduler, RNG, optional EMA and gradient-scaler
+state, the completed update count, and each process's DataLoader position. A
+stateful DataLoader lets a resumed run continue partway through an epoch rather
+than starting its sampling from the beginning. Resume requires
+`accelerator.dataloader_config.use_stateful_dataloader=true`.
+
+```bash
+python main.py resume_from=/absolute/path/to/checkpoints/last \
+  trainer.iterations=12000
+```
+
+Use the same model, optimizer, scheduler, EMA settings, and number of processes
+as the original run. `trainer.iterations` is the **total** desired update count,
+not the number of extra updates. Increasing it on resume also changes the
+remaining cosine learning-rate curve. The resumed run copies the previous
+`best.pth`. With `num_workers > 0`, resuming exactly at an epoch boundary can
+reshuffle that epoch.
+
+## Evaluate a model
+
+Use `best.pth` for standalone evaluation; `last/` is for resuming training.
+
+```bash
 python eval.py checkpoint_path=/absolute/path/to/checkpoints/best.pth
 python eval.py checkpoint_path=/absolute/path/to/checkpoints/best.pth apply_ema=true
 ```
 
-Accelerate prepares the model, optimizer, training DataLoader, and scheduler.
-It handles device placement, autocasting, backward passes, gradient scaling,
-gradient clipping, tracking, and checkpoint writes. Evaluation DataLoaders use
-Accelerate's preparation helper without padded duplicate samples. Validation
-uses the unwrapped model so uneven evaluation shards do not invoke DDP
-collectives. Scalar metrics are combined across processes with Accelerate.
-No job submission or cluster launcher is configured. Accelerate keeps its
-device and precision state for the whole process, so a Hydra multirun can sweep
-any setting except those under `accelerator`.
+The model is rebuilt from the saved model configuration. The evaluation
+DataLoader and inference pipeline come from the **current** evaluation config,
+so provide matching dataset or experiment overrides when needed.
+`apply_ema=true` requires a checkpoint produced with EMA enabled. Evaluation
+logs metrics to W&B and writes `metrics.json` under
+`outputs/<name>/eval/<date>/<time>/` by default.
 
-The default scheduler uses linear warmup for `lr_scheduler.num_warmup_steps`
-updates followed by cosine decay over `trainer.iterations` total updates.
-`lr_scheduler=constant` keeps the LR fixed without warmup. Schedulers and EMA
-advance only after successful optimizer updates, including under mixed precision.
-Mixed precision support depends on your hardware.
+`InferencePipeline.on_prediction()` is an optional output hook. In a
+multi-process run, it is called only for batches on the main process; global
+metrics still include every process's shard.
 
-EMA is disabled by default. Enable it with `trainer.use_ema=true`; its settings
-are under `trainer.ema`. Validation uses EMA weights when enabled. Standalone
-evaluation selects them with `apply_ema=true`.
+## Repository layout
 
-## Logging and checkpoints
-
-W&B always initializes for training and evaluation. Its default mode is online.
-Offline mode still records a real W&B run and can be selected for local testing:
-
-```bash
-python main.py wandb.mode=offline
+```text
+main.py, eval.py            Training and evaluation entrypoints
+config/                     Hydra groups for data, model, training, and tracking
+src/dataset/, src/models/   Project-specific dataset and model hooks
+src/trainer/                Training loop and checkpoint manager
+src/inference/              Evaluation pipeline
+src/utils/                  DataLoader, metric, logging, and figure helpers
+tests/                      Small CPU fixtures and infrastructure checks
+scripts/, assets/           Project scripts and documentation media
+data/, ckpt/               Ignored local data and selected checkpoints
 ```
 
-`wandb.mode=disabled` is rejected. There is no optional logger or JSONL fallback.
-Run directories contain the resolved `config.yaml`, W&B records, and training
-checkpoints. Evaluation also saves `metrics.json`.
-
-`best.pth` stores the model and optional EMA weights with the lowest validation
-loss, plus the run configuration. `last/` is an Accelerate state directory
-written every `trainer.checkpoint_every` updates; it holds the model, optimizer,
-scheduler, optional EMA, optional gradient scaler, RNG states, and completed
-iteration count.
-
-```bash
-python main.py resume_from=/absolute/path/to/checkpoints/last
-```
-
-Resume with matching architecture, optimizer, scheduler, EMA settings, and
-number of processes. `trainer.iterations` is the desired total number of
-updates. The cosine schedule spans `trainer.iterations`, so raising it on resume
-changes the remaining LR curve. The resumed run copies `best.pth` from the
-original run. The shuffle order is derived from the seed and epoch, and each
-rank resumes from its saved DataLoader position, so a resumed run sees the same
-batches as an uninterrupted one. With `num_workers > 0`, a resume exactly at an
-epoch boundary reshuffles that epoch. Resume requires
-`accelerator.dataloader_config.use_stateful_dataloader=true`. Evaluation reconstructs
-its model from the checkpoint configuration, including `Dataset.model_kwargs()`,
-and uses the current evaluation dataset and pipeline settings.
-
-## Checks
+## Check the infrastructure
 
 ```bash
 python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-The tests use a small CPU fixture and real offline W&B runs. They cover training,
-evaluation, resume, EMA, scheduling, mandatory tracking, and metric aggregation.
+The tests use a small synthetic CPU dataset and offline W&B runs. They exercise
+training, evaluation, resume, EMA, scheduling, and metric aggregation without
+requiring project data.
