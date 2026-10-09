@@ -42,8 +42,9 @@ python -m pip install -r requirements.txt
 wandb login
 ```
 
-W&B, Accelerate, and Diffusers are required dependencies. Diffusers supplies the
-LR schedulers and EMA implementation. There is no custom EMA or LR scheduler.
+W&B, Accelerate, Diffusers, and torchdata are required dependencies. Diffusers
+supplies the LR schedulers and EMA implementation. There is no custom EMA or LR
+scheduler. torchdata supplies the stateful DataLoader used for exact resume.
 
 ## Add project code
 
@@ -92,7 +93,9 @@ gradient clipping, tracking, and checkpoint writes. Evaluation DataLoaders use
 Accelerate's preparation helper without padded duplicate samples. Validation
 uses the unwrapped model so uneven evaluation shards do not invoke DDP
 collectives. Scalar metrics are combined across processes with Accelerate.
-No job submission or cluster launcher is configured.
+No job submission or cluster launcher is configured. Accelerate keeps its
+device and precision state for the whole process, so a Hydra multirun can sweep
+any setting except those under `accelerator`.
 
 The default scheduler uses linear warmup for `lr_scheduler.num_warmup_steps`
 updates followed by cosine decay over `trainer.iterations` total updates.
@@ -117,19 +120,27 @@ python main.py wandb.mode=offline
 Run directories contain the resolved `config.yaml`, W&B records, and training
 checkpoints. Evaluation also saves `metrics.json`.
 
-`best.pth` stores the lowest validation loss; `last.pth` stores the latest saved
-training state. Checkpoints include model, optimizer, scheduler, optional EMA,
-optional gradient scaler, configuration, and completed iteration count.
+`best.pth` stores the model and optional EMA weights with the lowest validation
+loss, plus the run configuration. `last/` is an Accelerate state directory
+written every `trainer.checkpoint_every` updates; it holds the model, optimizer,
+scheduler, optional EMA, optional gradient scaler, RNG states, and completed
+iteration count.
 
 ```bash
-python main.py resume_from=/absolute/path/to/checkpoints/last.pth
+python main.py resume_from=/absolute/path/to/checkpoints/last
 ```
 
-Resume with matching architecture, optimizer, scheduler, and EMA settings.
-`trainer.iterations` is the desired total number of updates. Resume does not
-restore RNG states or the exact DataLoader position. Evaluation reconstructs
-its model from the checkpoint configuration and uses the current evaluation
-dataset and pipeline settings.
+Resume with matching architecture, optimizer, scheduler, EMA settings, and
+number of processes. `trainer.iterations` is the desired total number of
+updates. The cosine schedule spans `trainer.iterations`, so raising it on resume
+changes the remaining LR curve. The resumed run copies `best.pth` from the
+original run. The shuffle order is derived from the seed and epoch, and each
+rank resumes from its saved DataLoader position, so a resumed run sees the same
+batches as an uninterrupted one. With `num_workers > 0`, a resume exactly at an
+epoch boundary reshuffles that epoch. Resume requires
+`accelerator.dataloader_config.use_stateful_dataloader=true`. Evaluation reconstructs
+its model from the checkpoint configuration, including `Dataset.model_kwargs()`,
+and uses the current evaluation dataset and pipeline settings.
 
 ## Checks
 

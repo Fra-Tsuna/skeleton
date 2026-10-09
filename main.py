@@ -53,8 +53,10 @@ def main(cfg: DictConfig):
     # Prepare validation separately to avoid padding it with duplicate samples.
     val_loader = prepare_eval_dataloader(val_loader, accelerator)
 
-    # Initialize W&B tracking
+    # Initialize W&B tracking with the config and dataset-dependent model params.
+    # Saving them in checkpoints lets evaluation rebuild the same model.
     resolved_config = OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True)
+    resolved_config["model"].update(model_kwargs)
     init_wandb(accelerator, cfg.wandb, resolved_config, cfg.result_dir)
 
     try:

@@ -115,8 +115,18 @@ class CheckpointManager:
             raise RuntimeError("Checkpoint load failed: " + "; ".join(errors))
 
         # The best model may be newer than the last recovery checkpoint.
+        # Copy it from the resumed run so this run's best.pth matches best_val_loss.
+        source = Path(checkpoint_path).parent / "best.pth"
         best_path = self.checkpoints_path / "best.pth"
-        best_loss = self._main_call(lambda: self.read(best_path)["best_val_loss"] if best_path.is_file() else None)
+
+        def import_best():
+            if not source.is_file():
+                return None
+            if source.resolve() != best_path.resolve():
+                shutil.copyfile(source, best_path)
+            return self.read(best_path)["best_val_loss"]
+
+        best_loss = self._main_call(import_best)
         if best_loss is not None and best_loss < self.best_val_loss:
             self.best_val_loss = best_loss
             self.counter = 0

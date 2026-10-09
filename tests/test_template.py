@@ -20,6 +20,11 @@ from tests.fixtures import TestDataset, TestModel, TestTrainer, TestInference
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def training_state(path, name="custom_checkpoint_0.pkl"):
+    # Accelerate stores the manager counters first, then optional EMA state.
+    return torch.load(path / name, map_location="cpu", weights_only=False)
+
+
 def configuration(tmp_path, eval_config=False):
     with initialize_config_dir(version_base=None, config_dir=str(ROOT / "config")):
         cfg = compose(config_name="eval" if eval_config else "train")
@@ -55,13 +60,13 @@ def test_train_checkpoint_resume_and_evaluate(tmp_path, use_ema, monkeypatch):
     cfg.trainer.use_ema = use_ema
     result = training_main.__wrapped__(cfg)
     assert result["loss"] >= 0
-    last_path = tmp_path / "run/checkpoints/last.pth"
+    last_path = tmp_path / "run/checkpoints/last"
     best_path = tmp_path / "run/checkpoints/best.pth"
-    checkpoint = CheckpointManager.read(last_path)
     assert best_path.is_file()
-    assert checkpoint["iteration"] == 4
-    assert checkpoint["config"]["model"]["input_dim"] == 1
-    assert (checkpoint["ema_state_dict"] is not None) == use_ema
+    assert training_state(last_path)["iteration"] == 4
+    assert CheckpointManager.read(best_path)["config"]["model"]["input_dim"] == 1
+    assert (CheckpointManager.read(best_path)["ema_model_state_dict"] is not None) == use_ema
+    assert (last_path / "custom_checkpoint_1.pkl").is_file() == use_ema
     assert [record["step"] for record in logged] == [1, 2, 3, 4]
     assert all("val/loss" in logged[index] for index in [1, 3])
     assert list((tmp_path / "run/wandb").rglob("*.wandb"))
@@ -70,10 +75,11 @@ def test_train_checkpoint_resume_and_evaluate(tmp_path, use_ema, monkeypatch):
     cfg.trainer.iterations = 6
     cfg.result_dir = str(tmp_path / "resumed")
     training_main.__wrapped__(cfg)
-    resumed = CheckpointManager.read(tmp_path / "resumed/checkpoints/last.pth")
-    assert resumed["iteration"] == 6
+    resumed = tmp_path / "resumed/checkpoints/last"
+    assert training_state(resumed)["iteration"] == 6
     assert [record["step"] for record in logged[-2:]] == [5, 6]
-    assert resumed["optimizer_state_dict"]["state"][0]["step"].item() == 6
+    assert training_state(resumed, "optimizer.bin")["state"][0]["step"].item() == 6
+    assert (tmp_path / "resumed/checkpoints/best.pth").is_file()
 
     eval_cfg = configuration(tmp_path, eval_config=True)
     eval_cfg.result_dir = str(tmp_path / "evaluation")
@@ -118,10 +124,38 @@ def test_early_stopping(tmp_path):
     cfg.trainer.validate_every = 1
     cfg.trainer.patience = 1
     training_main.__wrapped__(cfg)
-    checkpoint = CheckpointManager.read(tmp_path / "run/checkpoints/last.pth")
+    checkpoint = training_state(tmp_path / "run/checkpoints/last")
     assert checkpoint["iteration"] == 2
     assert checkpoint["counter"] == 1
     assert CheckpointManager.read(tmp_path / "run/checkpoints/best.pth")["iteration"] == 1
+
+
+@pytest.mark.parametrize("split", [3, 4])
+def test_resume_reproduces_uninterrupted_training(tmp_path, split, monkeypatch):
+    losses = []
+    original_log = Accelerator.log
+
+    def record_log(self, values, step=None, **kwargs):
+        losses.append(values["train/loss"])
+        return original_log(self, values, step=step, **kwargs)
+
+    monkeypatch.setattr(Accelerator, "log", record_log)
+
+    def train(result, iterations, resume_from=None):
+        cfg = configuration(tmp_path)
+        cfg.result_dir = str(tmp_path / result)
+        cfg.trainer.iterations = iterations
+        cfg.lr_scheduler = {"name": "constant"}
+        cfg.resume_from = resume_from
+        training_main.__wrapped__(cfg)
+
+    # The fixture has three batches per epoch: split 3 ends an epoch, split 4 is mid-epoch.
+    train("full", 7)
+    full = list(losses)
+    losses.clear()
+    train("first", split)
+    train("second", 7, str(tmp_path / "first/checkpoints/last"))
+    assert losses == pytest.approx(full)
 
 
 def test_library_ema_update_and_missing_ema_error():
@@ -134,7 +168,7 @@ def test_library_ema_update_and_missing_ema_error():
     ema.step(model.parameters())
     assert torch.allclose(ema.shadow_params[0], old_weight + 2 * (1 - ema.cur_decay_value))
     with pytest.raises(ValueError, match="No EMA weights"):
-        CheckpointManager.restore_model({"model_state_dict": model.state_dict(), "ema_state_dict": None}, model, apply_ema=True)
+        CheckpointManager.restore_model({"model_state_dict": model.state_dict(), "ema_model_state_dict": None}, model, apply_ema=True)
 
 
 def test_disabled_wandb_is_rejected(tmp_path):

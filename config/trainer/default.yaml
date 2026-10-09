@@ -4,6 +4,7 @@ _convert_: all
 iterations: 10000
 result_dir: ${result_dir}
 validate_every: 500
+checkpoint_every: 500
 patience: null
 grad_clip_norm: null
 use_ema: false

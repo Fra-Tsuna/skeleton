@@ -3,3 +3,9 @@ cpu: false
 mixed_precision: "no"  # no, fp16, or bf16
 # The training loop advances the scheduler once per successful optimizer update.
 step_scheduler_with_optimizer: false
+dataloader_config:
+  _target_: accelerate.utils.DataLoaderConfiguration
+  # Derive the shuffle order from the seed and epoch so resumed runs see the same data.
+  use_seedable_sampler: true
+  # Save each rank's mid-epoch DataLoader position in training checkpoints.
+  use_stateful_dataloader: true
